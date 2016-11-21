@@ -5,6 +5,7 @@ from PIL import Image
 import os
 import OpenEXR
 import Imath
+import time
 
 depthPath = 'depth'
 
@@ -48,7 +49,7 @@ for camera in camera_settings[:2]:
     indices = []
     points = []
     start_index = len(positions)
-
+    start = time.time()
     for x in xrange(0,width,scale):
         for y in xrange(0,height,scale):
             position = np.dot(KRinv,(pix[x,y]*np.array([[x,y,1]])+KRC).transpose()).A1
@@ -66,6 +67,8 @@ for camera in camera_settings[:2]:
             indices.append(idx)
             points.append(position)
             index_to_camera.append(cameras)
+    end = time.time()
+    print "{} comparisons in {}ms".format(len(camera_tree),end-start)
 
     start_indices[f] = start_index
     tree_size[f] = len(points)
@@ -73,6 +76,9 @@ for camera in camera_settings[:2]:
     print points[0]
     print len(points)
     print np.shape(points)
+    start = time.time()
     camera_tree[f] = spatial.KDTree(points)
+    end = time.time()
+    print "KDTree in {}ms".format(end-start)
     camera_to_indices[f] = indices
     img2.save("intersection.png")
