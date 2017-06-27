@@ -50,31 +50,53 @@ def fill(img,x,y,width,height):
             if wx>=0 and wx<width and wy>=0 and wy<height:
                 img[wx,wy] = 1
 
-KR = T.matrix('KR')
-KRT = T.matrix('KRT')
-KR2 = T.matrix('KR2')
-KRT2 = T.matrix('KRT2')
-t = T.vector('t')
-t2 = T.vector('t2')
-v = T.matrix('v')
-p = T.dot(matrix_inverse(KR),T.transpose(v+KRT))
-c = T.transpose(T.dot(KR2,p)) -  KRT2
-#theano.scan
-f = theano.function([KR,KRT,KR2,KRT2,v],c)
-#f = theano.function([KR,KRT,v],p)
+
+
 
 class DIBR:
+    KR = T.matrix('KR')
+    KRT = T.matrix('KRT')
+    KR2 = T.matrix('KR2')
+    KRT2 = T.matrix('KRT2')
+    pix = T.matrix('pix')
+    xys = T.imatrix('xys')
+
+    @staticmethod
+    def _imageWarpPixel(xy,KR,KRT,KR2,KRT2,pix):
+        x,y = xy[0], xy[1]
+        xy1 = T.as_tensor_variable([x,y,1])
+        v = pix[xy1[1],xy1[0]] * xy1
+        p = T.dot(matrix_inverse(KR), T.transpose(v+KRT))
+        return (T.transpose(T.dot(KR2,p)) - KRT2)[0]
+
+    _imageWarpParams = [KR,KRT,KR2,KRT2,pix]
+
+    _imageWarpScanResult, _imageWarpScanUpdates = theano.scan(
+                    fn=_imageWarpPixel.__func__,
+                    outputs_info=None,
+                    sequences=[xys],
+                    non_sequences=_imageWarpParams)
+    _imageWarp = theano.function(inputs=_imageWarpParams+[xys],outputs=_imageWarpScanResult)
+
     @staticmethod
     def ImageWarp(c1,c2):
         start = time.time()
         tempImage = Image.new("1",c1.size,"black")
         temp = tempImage.load()
-        for x in xrange(0,c1.width):
+        pix = np.array(c1.img.getdata())
+        pix = pix.reshape((c1.size[1],c1.size[0]))
+        # Naive solution: using CPU (~14s per image pair)
+        """for x in xrange(0,c1.width):
             for y in xrange(0,c1.height):
-                #position = np.dot(c1.KRinv,(c1.pixel[x,y]*np.array([[x,y,1]])+c1.KRT).transpose()).A1
-                #coordinates = (np.dot(c2.KR,position)-c2.KRT).transpose().A1
-                coordinates = f(c1.KR,c1.KRT,c2.KR,c2.KRT,c1.pixel[x,y]*np.array([[x,y,1]]))[0]
-                fill(temp,coordinates[0]/coordinates[2],coordinates[1]/coordinates[2],c1.width,c1.height)
+                position = np.dot(c1.KRinv,(c1.pixel[x,y]*np.array([[x,y,1]])+c1.KRT).transpose()).A1
+                coordinates = (np.dot(c2.KR,position)-c2.KRT).transpose().A1
+                fill(temp,coordinates[0]/coordinates[2],coordinates[1]/coordinates[2],c1.width,c1.height)"""
+        # Better solution: using GPU (~5s per image pair)
+        coordinates_vec = DIBR._imageWarp(c1.KR,c1.KRT,c2.KR,c2.KRT,pix,np.array(np.meshgrid(xrange(0,c1.width),xrange(0,c1.height)),dtype=np.int32).T.reshape(-1,2))
+        # TODO: Fill result image by using GPU instead of CPU as well
+        for x,y,z in coordinates_vec:
+            fill(temp,x/z,y/z,c1.width,c1.height)
+
         end = time.time()
         print("DIBR in {}ms".format(end-start))
         return tempImage
