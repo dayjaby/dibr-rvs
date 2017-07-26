@@ -6,6 +6,7 @@ import OpenEXR
 import Imath
 import time
 import math
+import array
 
 import theano.tensor as T
 import theano
@@ -30,25 +31,29 @@ class Camera:
         self.KRinv = np.linalg.inv(self.KR)
         self.KRT = np.dot(self.KR,self.T)
         self.filename = settings['file']
-        self.imgEXR = OpenEXR.InputFile(os.path.join(depthPath,self.filename+".exr"))
-        dw = self.dataWindow = self.imgEXR.header()['dataWindow']
+        self.depthImgEXR = OpenEXR.InputFile(os.path.join(depthPath,self.filename+".exr"))
+        dw = self.dataWindow = self.depthImgEXR.header()['dataWindow']
         self.width, self.height = self.size = (dw.max.x-dw.min.x+1,dw.max.y-dw.min.y+1)
-        self.img = Image.fromstring("F",self.size,self.imgEXR.channel('R',Imath.PixelType(Imath.PixelType.FLOAT)))
-        self.pixel = self.img.load()
+        self.depthImg = Image.fromstring("F",self.size,self.depthImgEXR.channel('R',Imath.PixelType(Imath.PixelType.FLOAT)))
+        self.depthPixel = self.depthImg.load()
 
     def __eq__(self,other):
         return self.filename == other.filename
 
     def render(self,filename):
-        self.img.save(filename)
+        self.depthImg.save(filename)
 
-def fill(img,x,y,width,height):
+def fill(img,x,y,z,width,height,fillWhite):
     for xf in [math.floor,math.ceil]:
         for yf in [math.floor,math.ceil]:
             wx = xf(x)
             wy = yf(y)
             if wx>=0 and wx<width and wy>=0 and wy<height:
-                img[wx,wy] = 1
+                if fillWhite:
+                    img[wx,wy] = 1
+                else:
+                    if img[wx,wy] == 0 or img[wx,wy]>z:
+                        img[wx,wy] = z
 
 
 
@@ -79,11 +84,12 @@ class DIBR:
     _imageWarp = theano.function(inputs=_imageWarpParams+[xys],outputs=_imageWarpScanResult)
 
     @staticmethod
-    def ImageWarp(c1,c2):
+    def ImageWarp(c1,c2,fillWhite=True):
         start = time.time()
-        tempImage = Image.new("1",c1.size,"black")
+        tempImage = Image.new("F",c1.size,"black")
         temp = tempImage.load()
-        pix = np.array(c1.img.getdata())
+        #temp = np.zeros((c1.size[0],c1.size[1]),dtype=np.float32)
+        pix = np.array(c1.depthImg.getdata())
         pix = pix.reshape((c1.size[1],c1.size[0]))
         # Naive solution: using CPU (~14s per image pair)
         """for x in xrange(0,c1.width):
@@ -95,11 +101,15 @@ class DIBR:
         coordinates_vec = DIBR._imageWarp(c1.KR,c1.KRT,c2.KR,c2.KRT,pix,np.array(np.meshgrid(xrange(0,c1.width),xrange(0,c1.height)),dtype=np.int32).T.reshape(-1,2))
         # TODO: Fill result image by using GPU instead of CPU as well
         for x,y,z in coordinates_vec:
-            fill(temp,x/z,y/z,c1.width,c1.height)
+            fill(temp,x/z,y/z,z,c1.width,c1.height,fillWhite)
 
         end = time.time()
         print("DIBR in {}ms".format(end-start))
-        return tempImage
+        return tempImage.getdata()
+    
+    @staticmethod
+    def InverseMapping(src,dest):
+        warpDepth = 1
 
 class DIBRCamera(Camera):
     def __init__(self,id,settings):
@@ -115,8 +125,10 @@ class DIBRCamera(Camera):
 
     def render(self,filename):
         if len(self.referenceViews) == 1:
-            tempImage = self.DIBR_method(self.referenceViews[0],self)
-            tempImage.save(filename)
+            tempImage = self.DIBR_method(self.referenceViews[0],self,fillWhite=False)
+            tempData = np.array(tempImage,dtype=np.float32).reshape(-1).tostring()
+            out = OpenEXR.OutputFile(filename,self.depthImgEXR.header())
+            out.writePixels({'R': tempData, 'G': tempData, 'B': tempData})
 
 cameras = [Camera(id,settings) for id,settings in enumerate(camera_settings)]
 for c2 in cameras:
@@ -124,6 +136,6 @@ for c2 in cameras:
     for c1 in cameras:
         dibrCam.setReference(c1)
         if c1!=c2 and abs(c1.x - c2.x)<2 and abs(c1.y - c2.y)<2:
-            dibrCam.render("dibr-simple-results/intersection_{}_{}.png".format(c1.id,c2.id))
+            dibrCam.render("dibr-simple-results/intersection_{}_{}.exr".format(c1.id,c2.id))
             break
     break
