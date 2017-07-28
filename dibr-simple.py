@@ -7,6 +7,7 @@ import Imath
 import time
 import math
 import array
+import util
 
 import theano.tensor as T
 import theano
@@ -81,16 +82,11 @@ class DIBR:
                     outputs_info=None,
                     sequences=[xys],
                     non_sequences=_imageWarpParams)
-    _imageWarp = theano.function(inputs=_imageWarpParams+[xys],outputs=_imageWarpScanResult)
+    _imageWarpGPU = theano.function(inputs=_imageWarpParams+[xys],outputs=_imageWarpScanResult)
 
     @staticmethod
-    def ImageWarp(c1,c2,fillWhite=True):
-        start = time.time()
-        tempImage = Image.new("F",c1.size,"black")
-        temp = tempImage.load()
+    def _imageWarp(c1,c2,temp,pix,fillWhite=True):
         #temp = np.zeros((c1.size[0],c1.size[1]),dtype=np.float32)
-        pix = np.array(c1.depthImg.getdata())
-        pix = pix.reshape((c1.size[1],c1.size[0]))
         # Naive solution: using CPU (~14s per image pair)
         """for x in xrange(0,c1.width):
             for y in xrange(0,c1.height):
@@ -98,18 +94,31 @@ class DIBR:
                 coordinates = (np.dot(c2.KR,position)-c2.KRT).transpose().A1
                 fill(temp,coordinates[0]/coordinates[2],coordinates[1]/coordinates[2],c1.width,c1.height)"""
         # Better solution: using GPU (~5s per image pair)
-        coordinates_vec = DIBR._imageWarp(c1.KR,c1.KRT,c2.KR,c2.KRT,pix,np.array(np.meshgrid(xrange(0,c1.width),xrange(0,c1.height)),dtype=np.int32).T.reshape(-1,2))
+        coordinates_vec = DIBR._imageWarpGPU(c1.KR,c1.KRT,c2.KR,c2.KRT,pix,np.array(np.meshgrid(xrange(0,c1.width),xrange(0,c1.height)),dtype=np.int32).T.reshape(-1,2))
         # TODO: Fill result image by using GPU instead of CPU as well
         for x,y,z in coordinates_vec:
             fill(temp,x/z,y/z,z,c1.width,c1.height,fillWhite)
 
+    @staticmethod
+    def ImageWarp(src,dest):
+        start = time.time()
+        tempImage = Image.new("F",src.size,"black")
+        pix = np.array(src.depthImg.getdata()).reshape((src.size[1],src.size[0]))
+        DIBR._imageWarp(src,dest,tempImage.load(),pix,fillWhite=False)
         end = time.time()
-        print("DIBR in {}ms".format(end-start))
-        return tempImage.getdata()
-    
+        print("DIBR.ImageWarp in {}ms".format(end-start))
+        return tempImage
+
     @staticmethod
     def InverseMapping(src,dest):
-        warpDepth = 1
+        start = time.time()
+        depthWarped = Image.new("F",c1.size,"black")
+        depthPix = np.array(src.depthImg.getdata()).reshape((src.size[1],src.size[0]))
+        DIBR._imageWarp(src,dest,depthWarped.load(),depthPix,fillWhite=False)
+        end = time.time()
+        print("DIBR.InverseMapping in {}ms".format(end-start))
+        return depthWarped
+
 
 class DIBRCamera(Camera):
     def __init__(self,id,settings):
@@ -125,10 +134,8 @@ class DIBRCamera(Camera):
 
     def render(self,filename):
         if len(self.referenceViews) == 1:
-            tempImage = self.DIBR_method(self.referenceViews[0],self,fillWhite=False)
-            tempData = np.array(tempImage,dtype=np.float32).reshape(-1).tostring()
-            out = OpenEXR.OutputFile(filename,self.depthImgEXR.header())
-            out.writePixels({'R': tempData, 'G': tempData, 'B': tempData})
+            img  = self.DIBR_method(self.referenceViews[0],self)
+            util.exportGrayEXR(filename,img.getdata(), img.size)
 
 cameras = [Camera(id,settings) for id,settings in enumerate(camera_settings)]
 for c2 in cameras:
