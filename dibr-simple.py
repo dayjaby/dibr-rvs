@@ -14,6 +14,7 @@ import theano
 from theano.tensor.nlinalg import matrix_inverse
 
 depthPath = 'depth'
+imgPath = 'img'
 
 with open('cameraSettings.json') as file:
     camera_settings = json.load(file)
@@ -32,11 +33,13 @@ class Camera:
         self.KRinv = np.linalg.inv(self.KR)
         self.KRT = np.dot(self.KR,self.T)
         self.filename = settings['file']
+        self.colorImg = Image.open(os.path.join(imgPath,self.filename+".png"))
         self.depthImgEXR = OpenEXR.InputFile(os.path.join(depthPath,self.filename+".exr"))
         dw = self.dataWindow = self.depthImgEXR.header()['dataWindow']
         self.width, self.height = self.size = (dw.max.x-dw.min.x+1,dw.max.y-dw.min.y+1)
         self.depthImg = Image.fromstring("F",self.size,self.depthImgEXR.channel('R',Imath.PixelType(Imath.PixelType.FLOAT)))
         self.depthPixel = self.depthImg.load()
+        self.colorPixel = np.array(self.colorImg.getdata()).reshape((self.height,self.width,4))
 
     def __eq__(self,other):
         return self.filename == other.filename
@@ -44,15 +47,15 @@ class Camera:
     def render(self,filename):
         self.depthImg.save(filename)
 
-def fill(img,x,y,z,width,height,fillWhite):
+def fill(img,x,y,z,width,height,mode='fillWhite'):
     for xf in [math.floor,math.ceil]:
         for yf in [math.floor,math.ceil]:
             wx = xf(x)
             wy = yf(y)
             if wx>=0 and wx<width and wy>=0 and wy<height:
-                if fillWhite:
+                if mode == 'fillWhite':
                     img[wx,wy] = 1
-                else:
+                elif mode == 'forward':
                     if img[wx,wy] == 0 or img[wx,wy]>z:
                         img[wx,wy] = z
 
@@ -85,7 +88,7 @@ class DIBR:
     _imageWarpGPU = theano.function(inputs=_imageWarpParams+[xys],outputs=_imageWarpScanResult)
 
     @staticmethod
-    def _imageWarp(c1,c2,temp,pix,fillWhite=True):
+    def _imageWarp(c1,c2,pix):
         #temp = np.zeros((c1.size[0],c1.size[1]),dtype=np.float32)
         # Naive solution: using CPU (~14s per image pair)
         """for x in xrange(0,c1.width):
@@ -94,37 +97,61 @@ class DIBR:
                 coordinates = (np.dot(c2.KR,position)-c2.KRT).transpose().A1
                 fill(temp,coordinates[0]/coordinates[2],coordinates[1]/coordinates[2],c1.width,c1.height)"""
         # Better solution: using GPU (~5s per image pair)
-        coordinates_vec = DIBR._imageWarpGPU(c1.KR,c1.KRT,c2.KR,c2.KRT,pix,np.array(np.meshgrid(xrange(0,c1.width),xrange(0,c1.height)),dtype=np.int32).T.reshape(-1,2))
-        # TODO: Fill result image by using GPU instead of CPU as well
-        for x,y,z in coordinates_vec:
-            fill(temp,x/z,y/z,z,c1.width,c1.height,fillWhite)
+        coords = np.array(np.meshgrid(xrange(0,c1.width),xrange(0,c1.height)),dtype=np.int32).T.reshape(-1,2)
+        coordinates_vec = DIBR._imageWarpGPU(c1.KR,c1.KRT,c2.KR,c2.KRT,pix,coords)
+        return np.concatenate((coords,coordinates_vec),axis=1)
 
     @staticmethod
     def ImageWarp(src,dest):
         start = time.time()
-        tempImage = Image.new("F",src.size,"black")
+        depthWarped = Image.new("F",src.size,"black")
+        depthWarpedData = depthWarped.load()
+        imgWarped = Image.new("RGB",c1.size,"black")
+        imgWarpedData = imgWarped.load()
         pix = np.array(src.depthImg.getdata()).reshape((src.size[1],src.size[0]))
-        DIBR._imageWarp(src,dest,tempImage.load(),pix,fillWhite=False)
+        result = DIBR._imageWarp(src,dest,pix)
+        for ox,oy,x,y,z in result:
+            fill(depthWarpedData,x/z,y/z,z,src.width,src.height,mode='forward')
+            for xf in [math.floor,math.ceil]:
+                for yf in [math.floor,math.ceil]:
+                    if xf(x/z)>=0 and xf(x/z)<src.width and yf(y/z)>=0 and yf(y/z)<src.height:
+                        imgWarpedData[xf(x/z),yf(y/z)] =tuple( src.colorPixel[oy,ox].astype(int))
         end = time.time()
         print("DIBR.ImageWarp in {}ms".format(end-start))
-        return tempImage
+        return imgWarped, depthWarped
 
     @staticmethod
     def InverseMapping(src,dest):
         start = time.time()
         depthWarped = Image.new("F",c1.size,"black")
         depthPix = np.array(src.depthImg.getdata()).reshape((src.size[1],src.size[0]))
-        DIBR._imageWarp(src,dest,depthWarped.load(),depthPix,fillWhite=False)
+        depthWarpedData = depthWarped.load()
+        for ox,oy,x,y,z in DIBR._imageWarp(src,dest,depthPix):
+            fill(depthWarpedData,x/z,y/z,z,src.width,src.height,mode='forward')
+        imgWarped = Image.new("RGB",c1.size,"black")
+        depthPix2 = np.array(depthWarped.getdata()).reshape((src.size[1],src.size[0]))
+        imgWarpedData = imgWarped.load()
+        for ox,oy,x,y,z in DIBR._imageWarp(dest,src,depthPix2):
+            xmin = math.floor(x/z)
+            xmax = xmin+1
+            ymin = math.floor(y/z)
+            ymax = ymin+1
+            if xmin>=0 and ymin>=0 and xmax<dest.width and ymax<dest.height:
+                v1 = (x/z-xmin) * src.colorPixel[ymax,xmax] + (xmax-x/z) * src.colorPixel[ymax,xmin]
+                v2 = (x/z-xmin) * src.colorPixel[ymin,xmax] + (xmax-x/z) * src.colorPixel[ymin,xmin]
+                v = np.round((y/z-ymin) * v1 + (ymax-y/z) * v2).astype(int)
+                imgWarpedData[ox,oy] = tuple(v)
         end = time.time()
         print("DIBR.InverseMapping in {}ms".format(end-start))
-        return depthWarped
+        return imgWarped, depthWarped
 
 
 class DIBRCamera(Camera):
     def __init__(self,id,settings):
         Camera.__init__(self,id,settings)
         self.referenceViews = []
-        self.DIBR_method = DIBR.ImageWarp
+        #self.DIBR_method = DIBR.ImageWarp
+        self.DIBR_method = DIBR.InverseMapping
 
     def addReference(self,cam):
         self.referenceViews.append(cam)
@@ -132,10 +159,11 @@ class DIBRCamera(Camera):
     def setReference(self,cam):
         self.referenceViews = [cam]
 
-    def render(self,filename):
+    def render(self,imgFilename,filename):
         if len(self.referenceViews) == 1:
-            img  = self.DIBR_method(self.referenceViews[0],self)
-            util.exportGrayEXR(filename,img.getdata(), img.size)
+            img, depth  = self.DIBR_method(self.referenceViews[0],self)
+            util.exportGrayEXR(filename,depth.getdata(), depth.size)
+            img.save(imgFilename)
 
 cameras = [Camera(id,settings) for id,settings in enumerate(camera_settings)]
 for c2 in cameras:
@@ -143,6 +171,6 @@ for c2 in cameras:
     for c1 in cameras:
         dibrCam.setReference(c1)
         if c1!=c2 and abs(c1.x - c2.x)<2 and abs(c1.y - c2.y)<2:
-            dibrCam.render("dibr-simple-results/intersection_{}_{}.exr".format(c1.id,c2.id))
+            dibrCam.render("dibr-simple-results/dibr_{}_{}.png".format(c1.id,c2.id),"dibr-simple-results/intersection_{}_{}.png".format(c1.id,c2.id))
             break
     break
