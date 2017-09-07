@@ -1,2 +1,5 @@
 .idea
+*.o
+*.so
+*.pyc
 *.swp

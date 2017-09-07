@@ -68,6 +68,7 @@ def fill(img,x,y,z,width,height,mode='fillWhite'):
     img[math.floor(x),math.floor(y)] = z
 
 class DIBR:
+    adjust = T.scalar('adjust')
     KR = T.matrix('KR')
     KRinv = T.matrix('KRinv')
     KRT = T.matrix('KRT')
@@ -75,6 +76,7 @@ class DIBR:
     KRT2 = T.matrix('KRT2')
     pix = T.matrix('pix')
     xys = T.imatrix('xys')
+    srcColor = T.tensor3('srcColor')
     coords = theano.shared(np.ndarray(shape=(0,0)))
     coordsShape = (0,0)
 
@@ -98,36 +100,88 @@ class DIBR:
     pixT = T.transpose(pix)
     dest_img = T.zeros_like(pixT)
     pix2 = pixT.flatten()[:,np.newaxis]
-    r2 = pix2 * coords
-    r2 = r2 + KRT[0]
-    r2 = T.dot(r2,T.dot(KRinv,KR2))
-    r2 = r2 - KRT2[0]
+    # warp from camera 1 to camera 2
+    r2 = T.dot(pix2 * coords + KRT[0],T.dot(KRinv,KR2)) - KRT2[0]
+
+    # only take the points with 0<=x<pix.shape[1] and 0<=y<pix.shape[0]
     xge0 = (r2[:,0]>=0).nonzero()
     r2 = r2[xge0]
     c = coords[xge0]
     yge0 = (r2[:,1]>=0).nonzero()
     r2 = r2[yge0]
     c = c[yge0]
-    xltw = (r2[:,0]/r2[:,2]<T.shape(pix)[1]).nonzero()
+    xltw = (r2[:,0]/r2[:,2]<T.shape(pix)[1]-adjust).nonzero()
     r2 = r2[xltw]
     c = c[xltw]
-    ylth = (r2[:,1]/r2[:,2]<T.shape(pix)[0]).nonzero()
+    ylth = (r2[:,1]/r2[:,2]<T.shape(pix)[0]-adjust).nonzero()
     r2 = r2[ylth]
     c = c[ylth]
-    resultOrigAndWarp = T.concatenate((c[:,0:2],r2),axis=1)
 
-    _imageWarp2GPU = theano.function([pix,KRT,KRinv,KR2,KRT2],resultOrigAndWarp,on_unused_input='ignore')
+    resultOrigAndWarp = T.concatenate((c[:,0:2],r2),axis=1)
+    _imageWarp2GPU = theano.function([pix,KRT,KRinv,KR2,KRT2,adjust],resultOrigAndWarp,on_unused_input='ignore')
     #theano.printing.debugprint(_imageWarp2GPU)
 
-    rx = T.cast(r2[:,0]/r2[:,2],'int64')
-    ry = T.cast(r2[:,1]/r2[:,2],'int64')
+    rxf = r2[:,0]/r2[:,2]
+    ryf = r2[:,1]/r2[:,2]
+    rx = T.cast(rxf,'int32')
+    ry = T.cast(ryf,'int32')
     dest_img = T.set_subtensor(dest_img[rx,ry],r2[:,2])
-    _imageWarp2GPUFilled = theano.function([pix,KRT,KRinv,KR2,KRT2],T.transpose(dest_img))
+    _imageWarp2GPUFilled = theano.function([pix,KRT,KRinv,KR2,KRT2,adjust],T.transpose(dest_img))
+
+    # interpolate each pixel with the color values at (x,y),(x,y+1),(x+1,y),(x+1,y+1)
+    rxp1 = rx+1
+    ryp1 = ry+1
+    color0 = srcColor[ry  ,rx  ]
+    color1 = srcColor[ryp1,rx  ]
+    color2 = srcColor[ry  ,rxp1]
+    color3 = srcColor[ryp1,rxp1]
+    rxfmrx = rxf-rx
+    rxp1mrxf = rxp1-rxf
+    y1 = rxfmrx * T.transpose(color3) + rxp1mrxf * T.transpose(color1)
+    y0 = rxfmrx * T.transpose(color2) + rxp1mrxf * T.transpose(color0)
+    shape = T.as_tensor_variable([T.shape(pix)[1],T.shape(pix)[0],4])
+    v = T.transpose(T.cast((ryf-ry)*y1+(ryp1-ryf)*y0,'int32'))
+    dest_img = T.zeros(shape,'int32')
+    oc = T.cast(c[:,0:2],'int32')
+    ocx = oc[:,0]
+    ocy = oc[:,1]
+    dest_img = T.transpose(T.set_subtensor(dest_img[ocx,ocy],v),(1,0,2))
+    _imageWarp2GPUColor = theano.function([pix,srcColor,KRT,KRinv,KR2,KRT2,adjust],dest_img,on_unused_input='ignore')
 
     @staticmethod
-    def _imageWarp(c1,c2,pix,method=None):
-        if method is None:
-            method = DIBR._imageWarp2GPU
+    def _assureProperCoords(c):
+        if c.width != DIBR.coordsShape[0] or c.height != DIBR.coordsShape[1]:
+            newCoords = np.array(np.meshgrid(xrange(0,c.width),xrange(0,c.height),[1]),dtype=np.int32).T.reshape(-1,3)
+            DIBR.coords.set_value(newCoords)
+            DIBR.coordsShape = (c.width,c.height)
+
+    @staticmethod
+    def _imageWarpFilled(c1,c2,pix):
+        return DIBR._imageWarp2GPUFilled(pix,c1.KRT,c1.KRinv,c2.KR,c2.KRT,0)
+
+    @staticmethod
+    def _imageWarpColor(c1,c2,depth,color):
+        return DIBR._imageWarp2GPUColor(depth,color,c1.KRT,c1.KRinv,c2.KR,c2.KRT,1)
+
+    @staticmethod
+    def InverseMapping(src,dest):
+        start = time.time()
+        src = src[0]
+        DIBR._assureProperCoords(src)
+        depthWarpedData = DIBR._imageWarpFilled(src,dest,src.depthPixel)
+        kernel5 = np.ones((5,5),np.uint8)
+        kernel3 = np.ones((3,3),np.uint8)
+        depthWarpedData = cv2.dilate(depthWarpedData, kernel5, iterations=1)
+        depthWarpedData = cv2.erode(depthWarpedData, kernel3, iterations=2)
+        depthWarped = Image.fromarray(depthWarpedData.reshape(c1.height,c1.width))
+        imgWarpedData = DIBR._imageWarpColor(dest,src,depthWarpedData,src.colorPixel)
+        imgWarped = Image.fromarray(np.uint8(imgWarpedData.reshape(c1.height,c1.width,4)),'RGBA')
+        end = time.time()
+        print("DIBR.InverseMapping in {}s".format(end-start))
+        return imgWarped, depthWarped
+
+    @staticmethod
+    def _imageWarp(c1,c2,pix):
         #temp = np.zeros((c1.size[0],c1.size[1]),dtype=np.float32)
         # Naive solution: using CPU (~14s per image pair)
         """for x in xrange(0,c1.width):
@@ -141,13 +195,9 @@ class DIBR:
         coordinates_vec = DIBR._imageWarpGPU(c1.KR,c1.KRT,c2.KR,c2.KRT,pix,coords)
         result = np.concatenate((coords,coordinates_vec),axis=1)
         """
-        # Even better GPU solution:
-        if c1.width != DIBR.coordsShape[0] or c1.height != DIBR.coordsShape[1]:
-            newCoords = np.array(np.meshgrid(xrange(0,c1.width),xrange(0,c1.height),[1]),dtype=np.int32).T.reshape(-1,3)
-            DIBR.coords.set_value(newCoords)
-            DIBR.coordsShape = (c1.width,c1.height)
-        result = method(pix,c1.KRT,c1.KRinv,c2.KR,c2.KRT)
-        return result
+        # Even better GPU solution (~0.08s per image pair)
+        DIBR._assureProperCoords(c1)
+        return DIBR._imageWarp2GPU(pix,c1.KRT,c1.KRinv,c2.KR,c2.KRT,1)
 
     @staticmethod
     def ImageWarp(src,dest):
@@ -167,34 +217,6 @@ class DIBR:
         end = time.time()
         print("DIBR.ImageWarp in {}ms".format(end-start))
         return imgWarped, depthWarped
-
-    @staticmethod
-    def InverseMapping(src,dest):
-        start = time.time()
-        src = src[0]
-        depthWarpedData = DIBR._imageWarp(src,dest,src.depthPixel,method=DIBR._imageWarp2GPUFilled)
-        depthWarped = Image.fromarray(depthWarpedData.reshape(c1.size))
-        print("DIBR.InverseMapping#1 in {}ms".format(time.time()-start))
-        imgWarped = Image.new("RGB",c1.size,"black")
-        imgWarpedData = imgWarped.load()
-        epsilon = 0.3
-        for ox,oy,x,y,z in DIBR._imageWarp(dest,src,depthWarpedData):
-            x = x/z
-            y = y/z
-            xmin = int(math.floor(x))
-            xmax = xmin+1
-            ymin = int(math.floor(y))
-            ymax = ymin+1
-            if xmin>=0 and ymin>=0 and xmax<dest.width and ymax<dest.height:
-                colors, depths = zip(*[(src.colorPixel[y_,x_],src.depthPixel[y_,x_]) for y_ in [ymin,ymax] for x_ in [xmin,xmax]])
-                y1 = (x-xmin) * colors[3] + (xmax-x) * colors[1]
-                y0 = (x-xmin) * colors[2] + (xmax-x) * colors[0]
-                v = np.round((y-ymin) * y1 + (ymax-y) * y0).astype(int)
-                imgWarpedData[ox,oy] = tuple(v)
-        end = time.time()
-        print("DIBR.InverseMapping in {}ms".format(end-start))
-        return imgWarped, depthWarped
-
 
 class DIBRCamera(Camera):
     def __init__(self,id,settings):
