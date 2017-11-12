@@ -166,11 +166,11 @@ def rvs(n,m,k=2):
     for u,v,data in G.edges([root],data=True):
         top_calculations |= data['calcs']
 
-    def rvs_dijkstra(iterations=1,weight_fn=None,std=1):
+    def rvs_dijkstra(iterations=1,weight_fn=None,mean=0,std=1):
         if weight_fn is None:
             #weight_fn = lambda x,y,z: abs(np.random.normal(0,std*0.2*(abs(x-y)+abs(x-z))))
-            weight_fn = lambda x,y,z: abs(abs(x-y)+abs(x-z))
-            #weight_fn = lambda x,y,z: abs(np.random.normal(0,std))
+            #weight_fn = lambda x,y,z: abs(abs(x-y)+abs(x-z))
+            weight_fn = lambda x,y,z: abs(np.random.normal(mean,std))
         def edge_weight(u,v):
             if v==target:
                 h = u
@@ -211,6 +211,20 @@ def test_optimal_tree():
     plt.ylabel(r'$\gamma $s needed compared to worst case')
     plt.show()
 
+def test2():
+    for m in range(3,4):
+        ns = range(m+1,15)
+        avgs = []
+        n = 15
+        means = np.arange(0,10,0.25)
+        dijkstra, worst, best = rvs(n,m)
+        for mean in means:
+            _, avg = dijkstra(mean=mean,iterations=20)
+            avgs.append(avg/worst)
+        plt.plot(means, avgs, label="average", color=(1.0-(m-3)*0.2,0,0))
+    plt.xlabel(r'mean for normal distributed $\gamma$')
+    plt.ylabel(r'$\gamma $s needed compared to worst case')
+    plt.show()
 def test_draw_graph():
     if False==True:
         plt.figure(1,figsize=(20,12))
