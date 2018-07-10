@@ -1,6 +1,6 @@
 import numpy as np
 
-g = 4
+g = 1
 
 def f(i,x,y,arr):
     arr[x,y] = i

@@ -74,10 +74,11 @@ for h in dists.keys():
         
 distAvgArr = {g: [distAvgs[h][g]  for h in dists.keys()] for g in gamma_names}
             
-for f1,f2 in [('depthmse','ssim'),('ssim','dsqm'),('mse','ssim'),('mse','dsqm'),('depthmse','mse'),('depthmse','dsqm')]:
+#for f1,f2 in [('depthmse','ssim'),('ssim','dsqm'),('mse','ssim'),('mse','dsqm'),('depthmse','mse'),('depthmse','dsqm')]:
+for f1,f2,l1,l2 in [('mse','mseapprox','MSE','MSE approximation'),('ssim','ssimapprox','SSIM','SSIM approximation')]:
     slope, intercept, r_value, p_value, std_err = stats.linregress(values[f1], values[f2])
     plt.scatter(values[f1], values[f2], color=colors[f1], s=2)
     print(f1,f2,np.corrcoef(values[f1],values[f2])[0,1])
-    plt.xlabel(f1)
-    plt.ylabel(f2)
+    plt.xlabel(l1)
+    plt.ylabel(l2)
     plt.show()

@@ -117,7 +117,7 @@ def get_color(color):
         yield "#{0:02x}{1:02x}{2:02x}".format(*col)
 #approxs = [('ssim',['mse','depthssim','depthmse']), ('mse',['ssim','depthssim','depthmse'])]
 approxs = []
-color = get_color(len(gamma_names)+4)
+color = get_color(len(gamma_names)+25)
 ms = np.array(ms,dtype=np.int)
 approximations = {}
 
@@ -285,7 +285,7 @@ for f in gamma_names:
                     print("{}->{}    : {}".format(approx_by,f.ljust(5),p).ljust(60,' ') + " -> {:.7f}".format(total_weight))
     plt.plot(ms, equid, '.', color=mcolor, label="{}-equidistant".format(f))
     plt.plot(ms, best, color=mcolor, label=f)
-    plt.plot(ms, best2, '--', color=mcolor, label="{} approximation".format(f))
+    #plt.plot(ms, best2, '--', color=mcolor, label="{} approximation".format(f))
     plt.gca().xaxis.set_major_locator(MaxNLocator(integer=True))
     plt.xlabel(r'$m$')
     #plt.title(f)

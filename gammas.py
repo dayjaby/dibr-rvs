@@ -33,7 +33,7 @@ if __name__ == "__main__":
     parser.add_argument('--out')
     parser.add_argument('-k',type=int,default=2)
     parser.add_argument('-m',type=int)
-    parser.add_argument('--method',choices=["dibr","dibr-simplified","optflow-depth","dsqm"],default='dibr')
+    parser.add_argument('--method',choices=["dibr","dibr-simplified","optflow-depth","dsqm","mse-approx"],default='dibr')
     parser.add_argument('--outfile')
     parser.add_argument('--append', action='store_true')
     args = parser.parse_args()
@@ -77,16 +77,16 @@ if __name__ == "__main__":
         yvec = np.array(s['translation_y'])
         
         def idx(x,y):
-            return y+x*ys
-            #return x+y*xs
+            #return y+x*ys
+            return x+y*xs
         print([idx(x,0) for x in xrange(xs)])
         
         cameras = {idx(x,y): Camera(idx(x,y),{
             'x':x,'y':y,
-            'distortion':s['distortion'],
-            'distortion-depth':s['distortion-depth'],
+            'distortion':s['distortion'] if 'distortion' in s else None,
+            'distortion-depth':s['distortion-depth'] if 'distortion-depth' in s else None,
             'kalibration':s['kalibration'],
-            'kalibration-depth':s['kalibration-depth'],
+            'kalibration-depth':s['kalibration-depth'] if 'kalibration-depth' in s else s['kalibration'],
             'rotation':s['rotation'],
             'translation':np.array(s['translation']) + x*xvec + y*yvec,
             'img_file':s['img_file'].format(s['camera_id'],idx(x,y)),
@@ -161,6 +161,23 @@ for y in xrange(0,ys):
                             #cv2.imwrite(os.path.join("blender_output_dsqm","dsqm_{}_{}_{}_{}_2.png".format(y,j,l,r)),synthetic)
                             cv2.imwrite(os.path.join("blender_output_dsqm","dsqm_{}_{}_{}_{}.png".format(y,j,l,r)),pc)
                             args.outfile.write("{} {} {} {} {} {} {} {}\n".format('dsqm',y,j,y,l,y,r,score))
+                    elif args.method == "mse-approx":
+                        if not args.append or 'mseapprox' not in gamma or (y,j,y,l,y,r) not in gamma['mseapprox']:
+                            original = np.array(xyCamera[(j,y)].colorPixel)[:,:,0:3]
+                            synthetic1 = cv2.imread(os.path.join(args.out,"dibr_{}_{}_{}.png".format(y,j,r)))[:,:,[2,1,0]]
+                            synthetic2 = cv2.imread(os.path.join(args.out,"dibr_{}_{}_{}.png".format(y,j,l)))[:,:,[2,1,0]]
+                            mse1 = ((original - synthetic1) ** 2)
+                            mse2 = ((original - synthetic2) ** 2)
+                            mse = np.minimum(mse1,mse2)
+                            synthetic = synthetic1
+                            eq2 = (mse == mse2)
+                            synthetic[eq2] = synthetic2[eq2]
+                            mse = mse.mean()/65536.0
+                            ssim = compare_ssim(original,synthetic,multichannel=True,gaussian_weights=True,use_sample_covariance=False,sigma=1.5)
+                            ssim = 1-(1+ssim)/2
+                            args.outfile.write("{} {} {} {} {} {} {} {}\n".format('mseapprox',y,j,y,l,y,r,mse))
+                            args.outfile.write("{} {} {} {} {} {} {} {}\n".format('ssimapprox',y,j,y,l,y,r,ssim))
+
                     elif args.method == "optflow-depth":
                         if not args.append or 'optflow-depth' not in gamma or (y,j,y,l,y,r) not in gamma['optflow-depth']:
                             flow_left = cv2.calcOpticalFlowFarneback(xyCamera[(l,y)].depthPixel,xyCamera[(j,y)].depthPixel, 0.5, 3, 15, 3, 5, 1.1, 0)
